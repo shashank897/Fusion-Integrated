@@ -1,8 +1,9 @@
 """Leave Application submission and withdrawal services."""
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 
 from modules.elm.domain.calculations import calculate_leave_days, check_date_overlap
 from modules.elm.domain.state_machine import LeaveStateMachine
@@ -37,7 +38,8 @@ def apply_for_leave(
     existing_leaves = LeaveRequest.objects.filter(
         user_id=user_id,
         status__in=[
-            "awaiting_substitute", "awaiting_unit_head", "awaiting_establishment",
+            "awaiting_substitute", "substitute_declined", "awaiting_unit_head",
+            "awaiting_establishment",
             "awaiting_final_sanction", "approved",
         ],
     )
@@ -153,3 +155,99 @@ def withdraw_leave_application(user_id: int, leave_id: int) -> LeaveRequest:
     )
 
     return req
+
+
+@transaction.atomic
+def request_leave_extension(
+    user_id: int,
+    leave_id: int,
+    end_date: date,
+    reason: str,
+    substitute_user_id: int | None = None,
+) -> LeaveRequest:
+    """Submit an extension request for an ongoing EL, COL, or VL leave."""
+    original = LeaveRequest.objects.select_for_update().filter(
+        user_id=user_id, pk=leave_id, status="approved", is_extension=False
+    ).first()
+    if not original:
+        raise ValueError("Ongoing approved leave was not found.")
+    if original.category not in {"EL", "COL", "VL"}:
+        raise ValueError("Only EL, COL, and VL leave can be extended.")
+
+    today = timezone.localdate()
+    if not original.start_date <= today <= original.end_date:
+        raise ValueError("An extension can only be requested while the leave is ongoing.")
+    if end_date <= original.end_date:
+        raise ValueError("Extension end date must be after the approved end date.")
+
+    extension_start = original.end_date + timedelta(days=1)
+    active_statuses = [
+        "awaiting_substitute", "substitute_declined", "awaiting_unit_head",
+        "awaiting_establishment",
+        "awaiting_final_sanction", "approved", "extension_pending_substitute",
+        "extension_applicant_action_required", "extension_pending_unit_head",
+        "extension_pending_establishment", "extension_pending_final",
+    ]
+    for existing in LeaveRequest.objects.filter(user_id=user_id, status__in=active_statuses):
+        if check_date_overlap(
+            start1=extension_start, end1=end_date, is_half1=False, period1=None,
+            start2=existing.start_date, end2=existing.end_date,
+            is_half2=existing.is_half_day, period2=existing.half_day_period,
+        ):
+            raise ValueError(f"Extension conflicts with existing leave (#{existing.id}).")
+
+    if substitute_user_id is not None:
+        if substitute_user_id == user_id:
+            raise ValueError("Applicant cannot nominate themselves as substitute.")
+        substitute_conflict = LeaveRequest.objects.filter(
+            user_id=substitute_user_id,
+            status__in=active_statuses,
+            start_date__lte=end_date,
+            end_date__gte=extension_start,
+        ).exists()
+        if substitute_conflict:
+            raise ValueError("Nominated substitute has overlapping pending or approved leave.")
+
+    days = calculate_leave_days(
+        category=original.category,
+        start_date=extension_start,
+        end_date=end_date,
+    )
+    balance = LeaveBalance.objects.select_for_update().filter(
+        user_id=user_id,
+        year=extension_start.year,
+        category=original.category,
+    ).first()
+    available = balance.available_balance if balance else Decimal("0.00")
+    if Decimal(str(days)) > available:
+        raise ValueError(
+            f"Insufficient {original.category} balance. Required: {days}, Available: {available}."
+        )
+
+    requires_substitute = substitute_user_id is not None
+    status_value = (
+        "extension_pending_substitute" if requires_substitute
+        else "extension_pending_unit_head"
+    )
+    extension = LeaveRequest.objects.create(
+        user_id=user_id,
+        category=original.category,
+        start_date=extension_start,
+        end_date=end_date,
+        days_calculated=Decimal(str(days)),
+        reason=reason,
+        status=status_value,
+        substitute_user_id=substitute_user_id,
+        substitute_status="pending" if requires_substitute else "none",
+        unit_head_user_id=original.unit_head_user_id,
+        is_extension=True,
+        original_leave_id=original.id,
+    )
+    LeaveTransitionHistory.objects.create(
+        leave_request=extension,
+        from_status="draft",
+        to_status=status_value,
+        actor_user_id=user_id,
+        remarks=f"Extension requested for leave #{original.id}.",
+    )
+    return extension

@@ -109,3 +109,32 @@ def test_immediate_withdrawal():
     # Cannot withdraw approved leave
     res_invalid = LeaveStateMachine.withdraw_pending(LeaveStatus.APPROVED)
     assert res_invalid.success is False
+
+
+def test_extension_state_machine_includes_decline_replacement_and_routing():
+    """CW-EL-03: Extension consent and hierarchy states remain distinct."""
+    declined = LeaveStateMachine.process_substitute_response(
+        LeaveStatus.EXTENSION_PENDING_SUBSTITUTE, accepted=False, is_director=False
+    )
+    assert declined.new_status == LeaveStatus.EXTENSION_APPLICANT_ACTION_REQUIRED
+
+    replaced = LeaveStateMachine.replace_extension_substitute(declined.new_status)
+    assert replaced.success is True
+    assert replaced.new_status == LeaveStatus.EXTENSION_PENDING_SUBSTITUTE
+
+    accepted = LeaveStateMachine.process_substitute_response(
+        replaced.new_status, accepted=True, is_director=False
+    )
+    assert accepted.new_status == LeaveStatus.EXTENSION_PENDING_UNIT_HEAD
+
+    recommended = LeaveStateMachine.extension_unit_head_review(
+        accepted.new_status, decision="recommend", has_establishment_step=True
+    )
+    assert recommended.new_status == LeaveStatus.EXTENSION_PENDING_ESTABLISHMENT
+
+    routed = LeaveStateMachine.extension_establishment_route(recommended.new_status)
+    assert routed.new_status == LeaveStatus.EXTENSION_PENDING_FINAL
+
+    withdrawn = LeaveStateMachine.withdraw_pending(routed.new_status)
+    assert withdrawn.success is True
+    assert withdrawn.new_status == LeaveStatus.WITHDRAWN

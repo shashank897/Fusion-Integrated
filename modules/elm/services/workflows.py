@@ -41,6 +41,53 @@ def respond_substitute(substitute_user_id: int, leave_id: int, accepted: bool) -
 
 
 @transaction.atomic
+def nominate_replacement_substitute(
+    user_id: int,
+    leave_id: int,
+    substitute_user_id: int,
+) -> LeaveRequest:
+    """Replace a declined substitute on a pending extension request."""
+    req = LeaveRequest.objects.select_for_update().filter(
+        pk=leave_id, user_id=user_id, is_extension=True
+    ).first()
+    if not req:
+        raise ValueError("Extension request not found.")
+    res = LeaveStateMachine.replace_extension_substitute(req.status)
+    if not res.success:
+        raise ValueError(res.message)
+    if substitute_user_id == user_id:
+        raise ValueError("Applicant cannot nominate themselves as substitute.")
+    conflict = LeaveRequest.objects.filter(
+        user_id=substitute_user_id,
+        status__in=[
+            "awaiting_substitute", "substitute_declined", "awaiting_unit_head",
+            "awaiting_establishment",
+            "awaiting_final_sanction", "approved", "extension_pending_substitute",
+            "extension_applicant_action_required", "extension_pending_unit_head",
+            "extension_pending_establishment", "extension_pending_final",
+        ],
+        start_date__lte=req.end_date,
+        end_date__gte=req.start_date,
+    ).exists()
+    if conflict:
+        raise ValueError("Nominated substitute has overlapping pending or approved leave.")
+
+    old_status = req.status
+    req.substitute_user_id = substitute_user_id
+    req.substitute_status = "pending"
+    req.status = res.new_status.value
+    req.save(update_fields=["substitute_user_id", "substitute_status", "status", "updated_at"])
+    LeaveTransitionHistory.objects.create(
+        leave_request=req,
+        from_status=old_status,
+        to_status=req.status,
+        actor_user_id=user_id,
+        remarks="Replacement extension substitute nominated.",
+    )
+    return req
+
+
+@transaction.atomic
 def review_unit_head(
     unit_head_user_id: int,
     leave_id: int,
@@ -52,11 +99,18 @@ def review_unit_head(
     if not req:
         raise ValueError("Leave request not found.")
 
-    res = LeaveStateMachine.unit_head_review(
-        category=req.category,
-        decision=decision.lower(),
-        has_establishment_step=True,
-    )
+    if req.is_extension:
+        res = LeaveStateMachine.extension_unit_head_review(
+            current_status=req.status,
+            decision=decision.lower(),
+            has_establishment_step=True,
+        )
+    else:
+        res = LeaveStateMachine.unit_head_review(
+            category=req.category,
+            decision=decision.lower(),
+            has_establishment_step=True,
+        )
     if not res.success:
         raise ValueError(res.message)
 
@@ -90,7 +144,12 @@ def route_establishment(establishment_user_id: int, leave_id: int, remarks: str 
     if not req:
         raise ValueError("Leave request not found.")
 
-    res = LeaveStateMachine.establishment_route()
+    if req.is_extension:
+        res = LeaveStateMachine.extension_establishment_route(req.status)
+    else:
+        res = LeaveStateMachine.establishment_route()
+    if not res.success:
+        raise ValueError(res.message)
     old_status = req.status
     req.status = res.new_status.value
     req.establishment_user_id = establishment_user_id
@@ -118,15 +177,31 @@ def make_sanction_decision(
     if not req:
         raise ValueError("Leave request not found.")
 
+    if req.is_extension and req.status != "extension_pending_final":
+        raise ValueError("Extension is not awaiting a final sanction decision.")
+    if not req.is_extension and req.status not in {
+        "awaiting_final_sanction", "awaiting_director_self_sanction"
+    }:
+        raise ValueError("Leave request is not awaiting a final sanction decision.")
+
     res = LeaveStateMachine.final_sanction(approve)
     old_status = req.status
-    req.status = res.new_status.value
+    req.status = "extended" if req.is_extension and approve else res.new_status.value
     req.sanctioning_authority_user_id = authority_user_id
     req.final_decision_remarks = remarks
 
     if approve:
         req.sanctioned_at = timezone.now()
         _deduct_leave_balance(req)
+        if req.is_extension:
+            original = LeaveRequest.objects.select_for_update().filter(
+                pk=req.original_leave_id, user_id=req.user_id, status="approved"
+            ).first()
+            if not original:
+                raise ValueError("Original approved leave no longer exists.")
+            original.end_date = req.end_date
+            original.days_calculated += req.days_calculated
+            original.save(update_fields=["end_date", "days_calculated", "updated_at"])
 
     req.save()
 

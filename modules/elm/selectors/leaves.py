@@ -24,7 +24,7 @@ def get_substitute_pending_requests(substitute_user_id: int) -> QuerySet[LeaveRe
     """Retrieve all pending requests where user is nominated as substitute."""
     return LeaveRequest.objects.filter(
         substitute_user_id=substitute_user_id,
-        status="awaiting_substitute",
+        status__in=["awaiting_substitute", "extension_pending_substitute"],
     ).order_by("created_at")
 
 
@@ -45,6 +45,7 @@ def get_establishment_pending_requests() -> QuerySet[LeaveRequest]:
     return LeaveRequest.objects.filter(status__in=[
         "awaiting_establishment",
         "cancellation_pending_establishment",
+        "extension_pending_establishment",
     ]).order_by("created_at")
 
 

@@ -22,6 +22,11 @@ class LeaveStateMachine:
         LeaveStatus.AWAITING_DIRECTOR_SELF_SANCTION,
         LeaveStatus.AWAITING_ESTABLISHMENT,
         LeaveStatus.AWAITING_FINAL_SANCTION,
+        LeaveStatus.EXTENSION_PENDING_SUBSTITUTE,
+        LeaveStatus.EXTENSION_APPLICANT_ACTION_REQUIRED,
+        LeaveStatus.EXTENSION_PENDING_UNIT_HEAD,
+        LeaveStatus.EXTENSION_PENDING_ESTABLISHMENT,
+        LeaveStatus.EXTENSION_PENDING_FINAL,
     }
 
     # -------------------------------------------------------------------------
@@ -46,17 +51,28 @@ class LeaveStateMachine:
         is_director: bool,
     ) -> StateTransitionResult:
         """STT Row 4-6: Substitute response handling."""
-        if current_status != LeaveStatus.AWAITING_SUBSTITUTE:
+        allowed_statuses = {
+            LeaveStatus.AWAITING_SUBSTITUTE,
+            LeaveStatus.EXTENSION_PENDING_SUBSTITUTE,
+        }
+        if current_status not in allowed_statuses:
             return StateTransitionResult(False, current_status, "Request is not awaiting substitute.")
 
         if not accepted:
+            next_status = (
+                LeaveStatus.EXTENSION_APPLICANT_ACTION_REQUIRED
+                if current_status == LeaveStatus.EXTENSION_PENDING_SUBSTITUTE
+                else LeaveStatus.SUBSTITUTE_DECLINED
+            )
             return StateTransitionResult(
-                True, LeaveStatus.SUBSTITUTE_DECLINED,
-                "Substitute declined responsibility coverage."
+                True, next_status, "Substitute declined responsibility coverage."
             )
 
-        next_status = (LeaveStatus.AWAITING_DIRECTOR_SELF_SANCTION
-                       if is_director else LeaveStatus.AWAITING_UNIT_HEAD)
+        if current_status == LeaveStatus.EXTENSION_PENDING_SUBSTITUTE:
+            next_status = LeaveStatus.EXTENSION_PENDING_UNIT_HEAD
+        else:
+            next_status = (LeaveStatus.AWAITING_DIRECTOR_SELF_SANCTION
+                           if is_director else LeaveStatus.AWAITING_UNIT_HEAD)
         return StateTransitionResult(True, next_status, "Substitute accepted responsibility.")
 
     @staticmethod
@@ -66,6 +82,55 @@ class LeaveStateMachine:
             return StateTransitionResult(False, current_status, "No substitute decline to recover from.")
         return StateTransitionResult(
             True, LeaveStatus.AWAITING_SUBSTITUTE, "Replacement substitute nominated."
+        )
+
+    @staticmethod
+    def replace_extension_substitute(current_status: LeaveStatus) -> StateTransitionResult:
+        """Return a declined extension to the substitute-consent gate."""
+        if current_status != LeaveStatus.EXTENSION_APPLICANT_ACTION_REQUIRED:
+            return StateTransitionResult(
+                False,
+                current_status,
+                "No extension substitute decline to recover from.",
+            )
+        return StateTransitionResult(
+            True, LeaveStatus.EXTENSION_PENDING_SUBSTITUTE,
+            "Replacement extension substitute nominated."
+        )
+
+    @staticmethod
+    def extension_unit_head_review(
+        current_status: LeaveStatus,
+        decision: str,
+        has_establishment_step: bool = True,
+    ) -> StateTransitionResult:
+        """Route an extension recommendation through its configured hierarchy."""
+        if current_status != LeaveStatus.EXTENSION_PENDING_UNIT_HEAD:
+            return StateTransitionResult(
+                False, current_status, "Extension is not awaiting Unit Head review."
+            )
+        if decision not in ("recommend", "not_recommend"):
+            return StateTransitionResult(
+                False, current_status, "Extension requires Recommended or Not Recommended."
+            )
+        next_status = (
+            LeaveStatus.EXTENSION_PENDING_ESTABLISHMENT
+            if has_establishment_step else LeaveStatus.EXTENSION_PENDING_FINAL
+        )
+        return StateTransitionResult(
+            True, next_status, "Extension recommendation recorded."
+        )
+
+    @staticmethod
+    def extension_establishment_route(current_status: LeaveStatus) -> StateTransitionResult:
+        """Route a verified extension to its final sanctioning authority."""
+        if current_status != LeaveStatus.EXTENSION_PENDING_ESTABLISHMENT:
+            return StateTransitionResult(
+                False, current_status, "Extension is not awaiting Establishment."
+            )
+        return StateTransitionResult(
+            True, LeaveStatus.EXTENSION_PENDING_FINAL,
+            "Extension forwarded to the final Sanctioning Authority."
         )
 
     @staticmethod

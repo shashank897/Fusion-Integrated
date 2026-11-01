@@ -25,6 +25,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             "substitute_status", "unit_head_user_id", "unit_head_recommendation",
             "unit_head_remarks", "sanctioning_authority_user_id", "sanctioned_at",
             "is_offline_sanctioned", "offline_sanction_reference",
+            "is_extension", "original_leave_id",
             "created_at", "updated_at", "transitions",
         ]
 
@@ -81,3 +82,9 @@ class SanctionDecisionSerializer(serializers.Serializer):
 class ResumptionSubmitSerializer(serializers.Serializer):
     actual_date = serializers.DateField()
     remarks = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class LeaveExtensionCreateSerializer(serializers.Serializer):
+    end_date = serializers.DateField()
+    reason = serializers.CharField(max_length=1000)
+    substitute_user_id = serializers.IntegerField(required=False, allow_null=True)

@@ -8,6 +8,12 @@ urlpatterns = [
     path("leaves/<int:pk>/", views.LeaveDetailWithdrawView.as_view(), name="elm-leave-detail-withdraw"),
     path("leaves/<int:pk>/cancel/", views.LeaveCancellationView.as_view(), name="elm-leave-cancel"),
     path("leaves/<int:pk>/resume/", views.LeaveResumptionView.as_view(), name="elm-leave-resume"),
+    path("leaves/<int:pk>/extend/", views.LeaveExtensionView.as_view(), name="elm-leave-extend"),
+    path(
+        "leaves/<int:pk>/extension-substitute/",
+        views.ExtensionSubstituteView.as_view(),
+        name="elm-extension-substitute",
+    ),
     path("balances/", views.MyBalancesView.as_view(), name="elm-my-balances"),
     path("substitute/", views.SubstituteQueueView.as_view(), name="elm-substitute-queue"),
     path("substitute/<int:pk>/", views.SubstituteQueueView.as_view(), name="elm-substitute-respond"),

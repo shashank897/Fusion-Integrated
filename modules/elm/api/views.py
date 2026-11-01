@@ -10,6 +10,7 @@ from modules.elm.api.serializers import (
     HolidayCalendarSerializer,
     LeaveApplicationCreateSerializer,
     LeaveBalanceSerializer,
+    LeaveExtensionCreateSerializer,
     LeaveRequestSerializer,
     ResumptionSubmitSerializer,
     SanctionDecisionSerializer,
@@ -102,6 +103,52 @@ class LeaveResumptionView(APIView):
                 remarks=serializer.validated_data.get("remarks", ""),
             )
             return Response(LeaveRequestSerializer(req).data)
+        except ValueError as err:
+            return Response({"error": str(err)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class LeaveExtensionView(APIView):
+    permission_classes = [
+        IsAuthenticatedPrincipal,
+        HasModuleGrant("elm"),
+        HasPermission("elm.leave.extend"),
+    ]
+
+    def post(self, request, pk: int):
+        uid = _get_current_user_id(request)
+        serializer = LeaveExtensionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            extension = app_service.request_leave_extension(
+                user_id=uid,
+                leave_id=pk,
+                **serializer.validated_data,
+            )
+            return Response(LeaveRequestSerializer(extension).data, status=status.HTTP_201_CREATED)
+        except ValueError as err:
+            return Response({"error": str(err)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ExtensionSubstituteView(APIView):
+    permission_classes = [
+        IsAuthenticatedPrincipal,
+        HasModuleGrant("elm"),
+        HasPermission("elm.leave.extend"),
+    ]
+
+    def post(self, request, pk: int):
+        uid = _get_current_user_id(request)
+        substitute_user_id = request.data.get("substitute_user_id")
+        try:
+            substitute_user_id = int(substitute_user_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "substitute_user_id must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            extension = wf_service.nominate_replacement_substitute(uid, pk, substitute_user_id)
+            return Response(LeaveRequestSerializer(extension).data)
         except ValueError as err:
             return Response({"error": str(err)}, status=status.HTTP_400_BAD_REQUEST)
 

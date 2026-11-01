@@ -7,14 +7,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import django
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+
+import django
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.test")
 
 # Setup Django with SQLite in-memory to test full ORM, Services, and Migrations
 from django.conf import settings
+
 settings.DATABASES["default"] = {
     "ENGINE": "django.db.backends.sqlite3",
     "NAME": ":memory:",
@@ -23,19 +25,24 @@ settings.DATABASES["default"] = {
 django.setup()
 
 from django.core.management import call_command
-from modules.elm.models.balances import LeaveBalance, LeaveAccountTransaction
+
+from modules.elm.models.balances import LeaveAccountTransaction, LeaveBalance
 from modules.elm.models.holidays import HolidayCalendar
 from modules.elm.models.leaves import LeaveRequest, LeaveTransitionHistory
-from modules.elm.services.applications import apply_for_leave, withdraw_leave_application
+from modules.elm.services.applications import (
+    apply_for_leave,
+    request_leave_extension,
+    withdraw_leave_application,
+)
 from modules.elm.services.workflows import (
-    respond_substitute,
-    review_unit_head,
-    route_establishment,
     make_sanction_decision,
     request_cancellation,
+    respond_substitute,
     review_cancellation,
-    submit_resumption,
     review_resumption,
+    review_unit_head,
+    route_establishment,
+    submit_resumption,
 )
 from modules.elm.services.year_end import execute_year_end_processing
 
@@ -195,7 +202,46 @@ def run_integration_suite():
     assert bal_el.availed_balance == Decimal("7.00")  # 10 - 3 = 7
     print("PASS: Resumption with early return accurately refunded excess 3 days.")
 
-    print("Step 6: Testing Year-End Boundary Processing (EVT-01, BR-EL-007)...")
+    print("Step 6: Testing CW-EL-03: Ongoing Leave Extension... ")
+    extension_user_id = 2001
+    today = date.today()
+    ongoing_start = today - timedelta(days=1)
+    ongoing_end = today + timedelta(days=1)
+    extension_end = ongoing_end + timedelta(days=2)
+    LeaveBalance.objects.create(
+        user_id=extension_user_id,
+        year=ongoing_start.year,
+        category="EL",
+        credited_balance=Decimal("10.00"),
+        availed_balance=Decimal("3.00"),
+    )
+    ongoing_leave = LeaveRequest.objects.create(
+        user_id=extension_user_id,
+        category="EL",
+        start_date=ongoing_start,
+        end_date=ongoing_end,
+        days_calculated=Decimal("3.00"),
+        reason="Ongoing conference travel",
+        status="approved",
+        unit_head_user_id=unit_head_id,
+    )
+    extension = request_leave_extension(
+        user_id=extension_user_id,
+        leave_id=ongoing_leave.id,
+        end_date=extension_end,
+        reason="Conference extended by the host",
+    )
+    assert extension.status == "extension_pending_unit_head"
+    review_unit_head(unit_head_id, extension.id, decision="recommend")
+    route_establishment(establishment_id, extension.id)
+    extension_result = make_sanction_decision(director_id, extension.id, approve=True)
+    assert extension_result.status == "extended"
+    ongoing_leave.refresh_from_db()
+    assert ongoing_leave.end_date == extension_end
+    assert ongoing_leave.days_calculated == Decimal("5.00")
+    print("PASS: Approved extension updated the original leave and posted only added days.")
+
+    print("Step 7: Testing Year-End Boundary Processing (EVT-01, BR-EL-007)...")
     stats = execute_year_end_processing(2026)
     print("Year-end stats:", stats)
 
